@@ -1,0 +1,127 @@
+import math
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Twist
+from tf2_ros import Buffer, TransformListener, TransformException
+
+
+class GlobalCoordinate(Node):
+    def __init__(self):
+        super().__init__('global_coordinate')
+
+        # Parameter robot
+        self.r = 0.03
+        self.s = 0.17
+
+        self.wheel_velocity = {}
+
+        # Membaca kecepatan roda
+        self.joint_sub = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_callback,
+            10
+        )
+
+        # Membaca orientasi robot
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(
+            self.tf_buffer, self
+        )
+
+        # Publisher kecepatan global
+        self.publisher = self.create_publisher(
+            Twist,
+            '/global_velocity',
+            10
+        )
+
+        self.timer = self.create_timer(
+            0.5,
+            self.calculate_velocity
+        )
+
+        self.get_logger().info(
+            'Node Global Coordinate aktif'
+        )
+
+    def joint_callback(self, msg):
+        for name, velocity in zip(msg.name, msg.velocity):
+            self.wheel_velocity[name] = velocity
+
+    def calculate_velocity(self):
+        left_name = 'base_left_wheel_joint'
+        right_name = 'base_right_wheel_joint'
+
+        if (
+            left_name not in self.wheel_velocity
+            or right_name not in self.wheel_velocity
+        ):
+            return
+
+        phi_L = self.wheel_velocity[left_name]
+        phi_R = self.wheel_velocity[right_name]
+
+        # Forward kinematics
+        V_L = self.r * phi_L
+        V_R = self.r * phi_R
+
+        V_b = (V_L + V_R) / 2.0
+        omega = (V_R - V_L) / self.s
+
+        # Orientasi robot terhadap koordinat odom
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'odom',
+                'base_footprint',
+                rclpy.time.Time()
+            )
+        except TransformException:
+            return
+
+        q = transform.transform.rotation
+
+        # Menghitung sudut yaw
+        theta = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        )
+
+        # Kecepatan koordinat global
+        Vx = V_b * math.cos(theta)
+        Vy = V_b * math.sin(theta)
+
+        # Membuat pesan ROS 2
+        output = Twist()
+        output.linear.x = Vx
+        output.linear.y = Vy
+        output.angular.z = omega
+
+        self.publisher.publish(output)
+
+        # Menampilkan hasil di terminal
+        self.get_logger().info(
+            f'Vx = {Vx:.3f} m/s | '
+            f'Vy = {Vy:.3f} m/s | '
+            f'Omega = {omega:.3f} rad/s'
+        )
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GlobalCoordinate()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
